@@ -30,7 +30,7 @@ if model_source == "Hugging Face 사전 학습 모델":
             "facebook/wav2vec2-base",
             "facebook/wav2vec2-large-xlsr-53",
             # 실제 고양이 소리 분류용 모델이 있다면 여기에 추가
-            "YourUsername/cat-sound-classifier"  # 이 부분은 실제 모델 경로로 변경해야 함
+            # "YourUsername/cat-sound-classifier"  # 이 부분은 실제 모델 경로로 변경해야 함
         ]
     )
     model_path = model_option
@@ -38,17 +38,17 @@ if model_source == "Hugging Face 사전 학습 모델":
 else:
     model_path = st.sidebar.text_input(
         "로컬 모델 경로",
-        value="./models/cat_sound_model"
+        value="./assets/model_v0.01"  # 기본 경로 설정
     )
     st.sidebar.info(f"로컬 모델 경로: {model_path}")
 
 # 고양이 소리 클래스 정의
 cat_sound_classes = [
-    "야옹 (일반적인 울음)",
+    # "야옹 (일반적인 울음)",
     "그르렁 (만족/행복)",
     "하악 (위협/경고)",
-    "골골 (식사/요구)",
-    "킁킁 (인사/탐색)"
+    # "골골 (식사/요구)",
+    # "킁킁 (인사/탐색)"
 ]
 
 # 클래스 이름 수정 옵션 (캐시 함수 외부로 이동)
