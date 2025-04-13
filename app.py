@@ -15,49 +15,26 @@ from streamlit_webrtc import webrtc_streamer, WebRtcMode
 import queue
 import threading
 import av
+import mediapipe as mp
 
-# 사이드바에 모델 선택 옵션 추가 (캐시 함수 외부로 이동)
-st.sidebar.header("모델 설정")
-model_source = st.sidebar.radio(
-    "모델 소스 선택",
-    ["Hugging Face 사전 학습 모델", "로컬 학습 모델"]
-)
-
-if model_source == "Hugging Face 사전 학습 모델":
-    model_option = st.sidebar.selectbox(
-        "Hugging Face 모델 선택",
-        options=[
-            "facebook/wav2vec2-base",
-            "facebook/wav2vec2-large-xlsr-53",
-            # 실제 고양이 소리 분류용 모델이 있다면 여기에 추가
-            # "YourUsername/cat-sound-classifier"  # 이 부분은 실제 모델 경로로 변경해야 함
-        ]
-    )
-    model_path = model_option
-    st.sidebar.info(f"선택된 모델: {model_path}")
-else:
-    model_path = st.sidebar.text_input(
-        "로컬 모델 경로",
-        value="./assets/model_v0.01"  # 기본 경로 설정
-    )
-    st.sidebar.info(f"로컬 모델 경로: {model_path}")
+# 하드코딩된 모델 경로
+model_path = "./assets/model_v0.01"
 
 # 고양이 소리 클래스 정의
 cat_sound_classes = [
-    # "야옹 (일반적인 울음)",
     "그르렁 (만족/행복)",
-    "하악 (위협/경고)",
-    # "골골 (식사/요구)",
-    # "킁킁 (인사/탐색)"
+    "하악 (위협/경고)"
 ]
 
-# 클래스 이름 수정 옵션 (캐시 함수 외부로 이동)
-if st.sidebar.checkbox("클래스 이름 수정"):
-    new_classes = []
-    for i in range(len(cat_sound_classes)):
-        new_class = st.sidebar.text_input(f"클래스 {i+1}", cat_sound_classes[i])
-        new_classes.append(new_class)
-    cat_sound_classes = new_classes
+# VAD 설정
+mp_audio = mp.solutions.audio
+vad = mp_audio.Audio(
+    model_selection=1,  # 0: 음성, 1: 음성+소음
+    sample_rate=16000,
+    min_speech_duration=0.1,
+    min_silence_duration=0.1,
+    speech_pad_duration=0.1
+)
 
 # 모델 로드 함수 수정 - 위젯 없음
 @st.cache_resource
@@ -155,6 +132,8 @@ class AudioProcessor:
         self.audio_buffer = []
         self.sample_rate = 16000
         self.last_process_time = time.time()
+        self.is_speech = False
+        self.speech_threshold = 0.5  # 음성 감지 임계값
         
     def process_audio(self, frame):
         """오디오 프레임 처리"""
@@ -163,51 +142,61 @@ class AudioProcessor:
             sound = frame.to_ndarray()
             sound = sound.reshape(-1)
             
-            # 16-bit PCM에서 float32로 변환 (필요한 경우)
+            # 16-bit PCM에서 float32로 변환
             if sound.dtype == np.int16:
                 sound = sound.astype(np.float32) / 32768.0
                 
-            # 버퍼에 추가
-            self.audio_buffer.extend(sound.tolist())
+            # VAD 처리
+            audio_data = np.array(sound, dtype=np.float32)
+            vad_result = vad.process(audio_data)
             
-            # 2초마다 분석 (과도한 처리 방지를 위한 시간 확인 추가)
-            current_time = time.time()
-            buffer_duration = len(self.audio_buffer) / self.sample_rate
-            
-            if buffer_duration >= 2.0 and (current_time - self.last_process_time) >= 1.0:
-                self.last_process_time = current_time
+            if vad_result and vad_result.is_speech:
+                self.is_speech = True
+                # 버퍼에 추가
+                self.audio_buffer.extend(sound.tolist())
                 
-                # 버퍼에서 최신 2초 오디오 가져오기
-                audio_data = np.array(self.audio_buffer[-self.sample_rate*2:])
+                # 2초마다 분석 (과도한 처리 방지를 위한 시간 확인 추가)
+                current_time = time.time()
+                buffer_duration = len(self.audio_buffer) / self.sample_rate
                 
-                # 필요한 경우 오디오 정규화
-                if np.max(np.abs(audio_data)) > 0:
-                    audio_data = audio_data / np.max(np.abs(audio_data))
-                
-                # 특성 추출
-                try:
-                    inputs = self.feature_extractor(audio_data, sampling_rate=self.sample_rate, 
-                                                  return_tensors="pt", padding=True)
+                if buffer_duration >= 2.0 and (current_time - self.last_process_time) >= 1.0:
+                    self.last_process_time = current_time
                     
-                    # 예측
-                    with torch.no_grad():
-                        outputs = self.model(**inputs)
-                        predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
-                        predicted_class = torch.argmax(predictions, dim=-1).item()
-                        confidence_scores = predictions[0].tolist()
+                    # 버퍼에서 최신 2초 오디오 가져오기
+                    audio_data = np.array(self.audio_buffer[-self.sample_rate*2:])
                     
-                    # 결과 큐에 추가
-                    self.result_queue.put((predicted_class, confidence_scores))
-                except Exception as e:
-                    print(f"모델 예측 중 오류: {e}")
+                    # 필요한 경우 오디오 정규화
+                    if np.max(np.abs(audio_data)) > 0:
+                        audio_data = audio_data / np.max(np.abs(audio_data))
+                    
+                    # 특성 추출
+                    try:
+                        inputs = self.feature_extractor(audio_data, sampling_rate=self.sample_rate, 
+                                                      return_tensors="pt", padding=True)
+                        
+                        # 예측
+                        with torch.no_grad():
+                            outputs = self.model(**inputs)
+                            predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
+                            predicted_class = torch.argmax(predictions, dim=-1).item()
+                            confidence_scores = predictions[0].tolist()
+                        
+                        # 결과 큐에 추가
+                        self.result_queue.put((predicted_class, confidence_scores))
+                    except Exception as e:
+                        print(f"모델 예측 중 오류: {e}")
+                    
+                    # 버퍼 크기 유지 (마지막 3초 보존)
+                    self.audio_buffer = self.audio_buffer[-self.sample_rate*3:]
+            else:
+                self.is_speech = False
+                self.audio_buffer = []  # 음성이 아닐 때는 버퍼 초기화
                 
-                # 버퍼 크기 유지 (마지막 3초 보존)
-                self.audio_buffer = self.audio_buffer[-self.sample_rate*3:]
         except Exception as e:
             print(f"오디오 처리 중 오류: {e}")
         
-        # 프레임을 그대로 반환 (비디오 스트림이 없으므로 빈 프레임)
         return frame
+
 # 탭 설정
 tab1, tab2 = st.tabs(["파일 업로드", "실시간 분석"])
 
@@ -224,8 +213,6 @@ with tab1:
             else:
                 st.warning("모델이 로드되지 않았습니다.")
 
-# tab2 부분의 webrtc_streamer 함수 호출 부분을 다음과 같이 수정하세요:
-
 with tab2:
     st.header("실시간 오디오 분석")
     st.write("마이크로 고양이 소리를 녹음하여 실시간으로 분석합니다.")
@@ -233,7 +220,6 @@ with tab2:
     if feature_extractor and model:
         processor = AudioProcessor(feature_extractor, model)
         
-        # video 매개변수 대신 media_stream_constraints 사용
         webrtc_ctx = webrtc_streamer(
             key="cat-sound",
             mode=WebRtcMode.SENDRECV,
@@ -248,8 +234,12 @@ with tab2:
             
             result_placeholder = st.empty()
             confidence_placeholders = [st.empty() for _ in range(len(cat_sound_classes))]
+            vad_status = st.empty()
             
             while webrtc_ctx.state.playing:
+                # VAD 상태 표시
+                vad_status.markdown(f"### 음성 감지 상태: {'감지됨' if processor.is_speech else '감지되지 않음'}")
+                
                 if not processor.result_queue.empty():
                     predicted_class, confidence_scores = processor.result_queue.get()
                     

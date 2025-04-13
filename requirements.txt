@@ -6,3 +6,4 @@ soundfile
 matplotlib
 pydub
 streamlit-webrtc
+mediapipe
