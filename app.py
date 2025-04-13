@@ -11,7 +11,7 @@ import os
 from pydub import AudioSegment
 import matplotlib.pyplot as plt
 import time
-from streamlit_webrtc import webrtc_streamer, WebRtcMode
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import queue
 import threading
 import av
@@ -26,15 +26,23 @@ cat_sound_classes = [
     "하악 (위협/경고)"
 ]
 
-# VAD 설정
-mp_audio = mp.solutions.audio
-vad = mp_audio.Audio(
-    model_selection=1,  # 0: 음성, 1: 음성+소음
-    sample_rate=16000,
-    min_speech_duration=0.1,
-    min_silence_duration=0.1,
-    speech_pad_duration=0.1
+# MediaPipe Audio Classifier 설정
+BaseOptions = mp.tasks.BaseOptions
+AudioClassifier = mp.tasks.audio.AudioClassifier
+AudioClassifierOptions = mp.tasks.audio.AudioClassifierOptions
+AudioRunningMode = mp.tasks.audio.RunningMode
+AudioData = mp.tasks.components.containers.AudioData
+
+# 오디오 분류기 초기화
+options = AudioClassifierOptions(
+    base_options=BaseOptions(model_asset_path='yamnet.tflite'),
+    running_mode=AudioRunningMode.AUDIO_STREAM,
+    max_results=1,
+    score_threshold=0.5,
+    category_allowlist=['Speech', 'Music', 'Animal sounds']
 )
+
+classifier = AudioClassifier.create_from_options(options)
 
 # 모델 로드 함수 수정 - 위젯 없음
 @st.cache_resource
@@ -133,7 +141,6 @@ class AudioProcessor:
         self.sample_rate = 16000
         self.last_process_time = time.time()
         self.is_speech = False
-        self.speech_threshold = 0.5  # 음성 감지 임계값
         
     def process_audio(self, frame):
         """오디오 프레임 처리"""
@@ -145,52 +152,61 @@ class AudioProcessor:
             # 16-bit PCM에서 float32로 변환
             if sound.dtype == np.int16:
                 sound = sound.astype(np.float32) / 32768.0
-                
-            # VAD 처리
-            audio_data = np.array(sound, dtype=np.float32)
-            vad_result = vad.process(audio_data)
             
-            if vad_result and vad_result.is_speech:
-                self.is_speech = True
-                # 버퍼에 추가
-                self.audio_buffer.extend(sound.tolist())
-                
-                # 2초마다 분석 (과도한 처리 방지를 위한 시간 확인 추가)
-                current_time = time.time()
-                buffer_duration = len(self.audio_buffer) / self.sample_rate
-                
-                if buffer_duration >= 2.0 and (current_time - self.last_process_time) >= 1.0:
-                    self.last_process_time = current_time
-                    
-                    # 버퍼에서 최신 2초 오디오 가져오기
-                    audio_data = np.array(self.audio_buffer[-self.sample_rate*2:])
-                    
-                    # 필요한 경우 오디오 정규화
-                    if np.max(np.abs(audio_data)) > 0:
-                        audio_data = audio_data / np.max(np.abs(audio_data))
-                    
-                    # 특성 추출
-                    try:
-                        inputs = self.feature_extractor(audio_data, sampling_rate=self.sample_rate, 
-                                                      return_tensors="pt", padding=True)
-                        
-                        # 예측
-                        with torch.no_grad():
-                            outputs = self.model(**inputs)
-                            predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
-                            predicted_class = torch.argmax(predictions, dim=-1).item()
-                            confidence_scores = predictions[0].tolist()
-                        
-                        # 결과 큐에 추가
-                        self.result_queue.put((predicted_class, confidence_scores))
-                    except Exception as e:
-                        print(f"모델 예측 중 오류: {e}")
-                    
-                    # 버퍼 크기 유지 (마지막 3초 보존)
-                    self.audio_buffer = self.audio_buffer[-self.sample_rate*3:]
-            else:
-                self.is_speech = False
-                self.audio_buffer = []  # 음성이 아닐 때는 버퍼 초기화
+            # MediaPipe AudioData 생성
+            audio_data = AudioData.create_from_array(sound, self.sample_rate)
+            
+            # 오디오 분류 수행
+            classifier.classify_async(audio_data, int(time.time() * 1000))
+            
+            # 분류 결과 처리
+            if classifier.has_result():
+                result = classifier.get_result()
+                if result and result.classifications:
+                    for classification in result.classifications:
+                        for category in classification.categories:
+                            if category.category_name in ['Speech', 'Music', 'Animal sounds'] and category.score > 0.5:
+                                self.is_speech = True
+                                # 버퍼에 추가
+                                self.audio_buffer.extend(sound.tolist())
+                                
+                                # 2초마다 분석 (과도한 처리 방지를 위한 시간 확인 추가)
+                                current_time = time.time()
+                                buffer_duration = len(self.audio_buffer) / self.sample_rate
+                                
+                                if buffer_duration >= 2.0 and (current_time - self.last_process_time) >= 1.0:
+                                    self.last_process_time = current_time
+                                    
+                                    # 버퍼에서 최신 2초 오디오 가져오기
+                                    audio_data = np.array(self.audio_buffer[-self.sample_rate*2:])
+                                    
+                                    # 필요한 경우 오디오 정규화
+                                    if np.max(np.abs(audio_data)) > 0:
+                                        audio_data = audio_data / np.max(np.abs(audio_data))
+                                    
+                                    # 특성 추출
+                                    try:
+                                        inputs = self.feature_extractor(audio_data, sampling_rate=self.sample_rate, 
+                                                                      return_tensors="pt", padding=True)
+                                        
+                                        # 예측
+                                        with torch.no_grad():
+                                            outputs = self.model(**inputs)
+                                            predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
+                                            predicted_class = torch.argmax(predictions, dim=-1).item()
+                                            confidence_scores = predictions[0].tolist()
+                                        
+                                        # 결과 큐에 추가
+                                        self.result_queue.put((predicted_class, confidence_scores))
+                                    except Exception as e:
+                                        print(f"모델 예측 중 오류: {e}")
+                                    
+                                    # 버퍼 크기 유지 (마지막 3초 보존)
+                                    self.audio_buffer = self.audio_buffer[-self.sample_rate*3:]
+                                break
+                            else:
+                                self.is_speech = False
+                                self.audio_buffer = []  # 음성이 아닐 때는 버퍼 초기화
                 
         except Exception as e:
             print(f"오디오 처리 중 오류: {e}")
@@ -220,6 +236,10 @@ with tab2:
     if feature_extractor and model:
         processor = AudioProcessor(feature_extractor, model)
         
+        rtc_configuration = RTCConfiguration(
+            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        )
+        
         webrtc_ctx = webrtc_streamer(
             key="cat-sound",
             mode=WebRtcMode.SENDRECV,
@@ -227,6 +247,7 @@ with tab2:
             media_stream_constraints={"video": False, "audio": True},
             audio_receiver_size=1024,
             async_processing=True,
+            rtc_configuration=rtc_configuration
         )
         
         if webrtc_ctx.state.playing:
