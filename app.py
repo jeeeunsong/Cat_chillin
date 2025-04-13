@@ -33,13 +33,22 @@ AudioClassifierOptions = mp.tasks.audio.AudioClassifierOptions
 AudioRunningMode = mp.tasks.audio.RunningMode
 AudioData = mp.tasks.components.containers.AudioData
 
+# 결과를 저장할 전역 변수
+classification_result = None
+
+# 결과 콜백 함수
+def result_callback(result, output_timestamp):
+    global classification_result
+    classification_result = result
+
 # 오디오 분류기 초기화
 options = AudioClassifierOptions(
-    base_options=BaseOptions(model_asset_path='yamnet.tflite'),
+    base_options=BaseOptions(model_asset_path='./assets/yamnet.tflite'),
     running_mode=AudioRunningMode.AUDIO_STREAM,
     max_results=1,
     score_threshold=0.5,
-    category_allowlist=['Speech', 'Music', 'Animal sounds']
+    category_allowlist=['Speech', 'Music', 'Animal sounds'],
+    result_callback=result_callback
 )
 
 classifier = AudioClassifier.create_from_options(options)
