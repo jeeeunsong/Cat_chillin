@@ -7,3 +7,4 @@ matplotlib
 pydub
 streamlit-webrtc
 mediapipe
+opencv-python-headless
